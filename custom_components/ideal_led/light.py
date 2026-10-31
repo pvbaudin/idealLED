@@ -34,18 +34,9 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({vol.Required(CONF_MAC): cv.string})
 
 async def async_setup_entry(hass, config_entry, async_add_devices):
     instance = hass.data[DOMAIN][config_entry.entry_id]
-    # Don't fail setup if initial update fails - this can happen at HA startup
-    # when Bluetooth proxies aren't fully ready yet. The entity will always
-    # report as available so users can attempt to control it, and the actual
-    # BLE connection will be made on-demand when a command is issued.
-    try:
-        await instance.update()
-    except Exception as err:
-        LOGGER.warning(
-            "Initial connection to %s failed (%s), will retry on first command",
-            config_entry.data.get("name", "unknown"),
-            err
-        )
+    # No initial connect here: with a weak BLE link it can stall HA startup for
+    # minutes, and it learns nothing (the device reports no state). The entity
+    # re-asserts its restored state in the background once added.
     resend_interval = config_entry.options.get(
         CONF_RESEND_INTERVAL, DEFAULT_RESEND_INTERVAL
     )
