@@ -6,6 +6,12 @@
 > failure. On/off calls return immediately and the BLE work runs in the
 > background. The `in_sync`, `last_confirmed` and `consecutive_failures`
 > attributes show whether the device acknowledged the last send.
+>
+> It also adds software fades. The controller has no fade command, so on/off,
+> brightness and colour changes are stepped from HA every 0.1 s. They honour
+> `transition` in service calls, and the `default_transition` option (seconds,
+> default 0 = instant) applies when a call gives none, e.g. from Alexa or a
+> dashboard. Effects are not faded.
 
 # iDeal LED control
 

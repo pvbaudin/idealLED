@@ -21,7 +21,7 @@ from collections.abc import Callable
 import traceback
 import logging
 import colorsys
-from .const import COMMAND_BYTES, COMMAND_LOOKUP, FIRMWARE_OVERRIDE
+from .const import COMMAND_BYTES, COMMAND_LOOKUP, FIRMWARE_OVERRIDE, FADE_STEP_INTERVAL
 
 LOGGER = logging.getLogger(__name__)
 
@@ -199,6 +199,9 @@ class IDEALLEDInstance:
         self._effect = None
         self._effect_speed = 50
         self._color_mode = ColorMode.HS
+        # Brightness-scaled RGB last written, i.e. what the strip shows; fades start
+        # here. None = unknown (startup, or an effect is running): no fade, just set.
+        self._output_rgb: tuple[int, int, int] | None = None
         self._write_uuid = None
         self._write_colour_uuid = None
         self._read_uuid = None
@@ -356,7 +359,10 @@ class IDEALLEDInstance:
 
     @retry_bluetooth_connection_error
     async def set_rgb_color(
-        self, hs_col: Tuple[int, int], brightness: int | None = None
+        self,
+        hs_col: Tuple[int, int],
+        brightness: int | None = None,
+        transition: float = 0,
     ):
         LOGGER.debug(f"X Current brightness: {self._brightness}")
         if None in hs_col and self._hs_color is not None:
@@ -365,9 +371,6 @@ class IDEALLEDInstance:
             self._hs_color = hs_col
 
         LOGGER.debug("HS colour requested: %s", hs_col)
-        rgb_color = colorsys.hsv_to_rgb(hs_col[0] / 360, hs_col[1] / 100, 1)
-        rgb_color = [round(x * 255) for x in rgb_color]
-        LOGGER.debug("Calculated RGB colour: %s", rgb_color)
         self._effect = None
         self._color_mode = ColorMode.HS
         if brightness is None:
@@ -376,30 +379,49 @@ class IDEALLEDInstance:
             )
             if self._brightness is None:
                 self._brightness = 255
-            else:
-                brightness = self._brightness
+            brightness = self._brightness
         else:
             self._brightness = brightness
-        brightness_percent = int(brightness * 100 / 255)
-        # Now adjust the RBG values to match the brightness
-        red = int(rgb_color[0] * brightness / 255)
-        green = int(rgb_color[1] * brightness / 255)
-        blue = int(rgb_color[2] * brightness / 255)
-        LOGGER.debug("RGB colour adjusted for brightness: %s", (red, green, blue))
-        red   = int(red   >> 3) # You CAN send 8 bit colours to this thing, but you probably shouldn't for power reasons.  Thanks to the good folks at Hacker News for that insight.
-        green = int(green >> 3)
-        blue  = int(blue  >> 3)
+        await self.fade_rgb(self._scaled_rgb(hs_col, brightness), transition)
 
+    @staticmethod
+    def _scaled_rgb(hs_col: Tuple[int, int], brightness: int) -> tuple[int, int, int]:
+        """HS colour + brightness (0-255) -> the 8-bit RGB the strip should show."""
+        rgb_color = colorsys.hsv_to_rgb(hs_col[0] / 360, hs_col[1] / 100, 1)
+        return tuple(int(round(x * 255) * brightness / 255) for x in rgb_color)
+
+    async def _write_rgb(self, rgb: tuple[int, int, int]) -> None:
+        LOGGER.debug("Writing RGB %s", rgb)
+        # You CAN send 8 bit colours to this thing, but you probably shouldn't for power reasons.  Thanks to the good folks at Hacker News for that insight.
+        red, green, blue = (v >> 3 for v in rgb)
         rgb_packet = COMMAND_BYTES[self._command_type]["rgb_bytes"]
         rgb_packet[COMMAND_BYTES[self._command_type]["red_offset"]]   = red
         rgb_packet[COMMAND_BYTES[self._command_type]["green_offset"]] = green
         rgb_packet[COMMAND_BYTES[self._command_type]["blue_offset"]]  = blue
-
-        # Background colours for type 2 - do we need them?
-        # rgb_packet[12] = red
-        # rgb_packet[13] = green
-        # rgb_packet[14] = blue
         await self._write(rgb_packet)
+        self._output_rgb = rgb
+
+    async def fade_rgb(self, target: tuple[int, int, int], transition: float = 0) -> None:
+        """Step from the current output to target over transition seconds.
+
+        The device has no fade of its own, so this writes intermediate colours
+        every FADE_STEP_INTERVAL. Steps that don't change the 5-bit value the
+        strip actually uses are skipped. The final colour is always written.
+        """
+        start = self._output_rgb
+        steps = int(transition / FADE_STEP_INTERVAL)
+        if start is None or steps <= 1 or start == target:
+            await self._write_rgb(target)
+            return
+        last_sent = tuple(v >> 3 for v in start)
+        for i in range(1, steps):
+            step_start = self.loop.time()
+            rgb = tuple(round(s + (t - s) * i / steps) for s, t in zip(start, target))
+            if tuple(v >> 3 for v in rgb) != last_sent:
+                await self._write_rgb(rgb)
+                last_sent = tuple(v >> 3 for v in rgb)
+            await asyncio.sleep(max(0, FADE_STEP_INTERVAL - (self.loop.time() - step_start)))
+        await self._write_rgb(target)
 
     @retry_bluetooth_connection_error
     # effect, reverse=0, speed=50, saturation=50, colour_data=COLOUR_DATA
@@ -409,6 +431,7 @@ class IDEALLEDInstance:
             return
         self._effect = effect
         self._color_mode = ColorMode.BRIGHTNESS
+        self._output_rgb = None  # the effect drives the LEDs now
         effect_id = EFFECT_MAP.get(effect)
         if effect_id > 11: effect = 11
         brightness_pct = int(brightness /255 * 100)
@@ -503,7 +526,11 @@ class IDEALLEDInstance:
         # await self._write_colour_data(colour_data)
 
     @retry_bluetooth_connection_error
-    async def turn_on(self):
+    async def turn_on(self, from_black: bool = False):
+        """Power on. from_black blanks the colour first so a fade-in starts dark
+        instead of flashing whatever colour the strip last held."""
+        if from_black:
+            await self._write_rgb((0, 0, 0))
         # packet = bytearray.fromhex("05 54 55 52 4E 01 00 00 00 00 00 00 00 00 00 00")
         # packet = bytearray.fromhex("06 4C 45 44 4F 4E 00 00 00 00 00 00 00 00 00 00")
         packet = COMMAND_BYTES[self._command_type]["turn_on_bytes"]
@@ -511,7 +538,9 @@ class IDEALLEDInstance:
         self._is_on = True
 
     @retry_bluetooth_connection_error
-    async def turn_off(self):
+    async def turn_off(self, transition: float = 0):
+        if transition and self._output_rgb is not None and self._is_on:
+            await self.fade_rgb((0, 0, 0), transition)
         # packet = bytearray.fromhex("05 54 55 52 4E 01 00 00 00 00 00 00 00 00 00 00")
         # packet = bytearray.fromhex("06 4C 45 44 4F 46 46 00 00 00 00 00 00 00 00 00")
         packet = COMMAND_BYTES[self._command_type]["turn_off_bytes"]

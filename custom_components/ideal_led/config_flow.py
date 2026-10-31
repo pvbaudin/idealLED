@@ -16,7 +16,14 @@ from homeassistant.components.bluetooth import (
 from bluetooth_sensor_state_data import BluetoothData
 from home_assistant_bluetooth import BluetoothServiceInfo
 
-from .const import DOMAIN, CONF_DELAY, CONF_RESEND_INTERVAL, DEFAULT_RESEND_INTERVAL
+from .const import (
+    DOMAIN,
+    CONF_DELAY,
+    CONF_RESEND_INTERVAL,
+    DEFAULT_RESEND_INTERVAL,
+    CONF_DEFAULT_TRANSITION,
+    DEFAULT_TRANSITION,
+)
 import logging
 
 LOGGER = logging.getLogger(__name__)
@@ -230,6 +237,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data={
                 CONF_DELAY: user_input[CONF_DELAY],
                 CONF_RESEND_INTERVAL: user_input[CONF_RESEND_INTERVAL],
+                CONF_DEFAULT_TRANSITION: user_input[CONF_DEFAULT_TRANSITION],
             })
 
         return self.async_show_form(
@@ -241,6 +249,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         CONF_RESEND_INTERVAL,
                         default=options.get(CONF_RESEND_INTERVAL, DEFAULT_RESEND_INTERVAL),
                     ): vol.All(int, vol.Range(min=0)),
+                    vol.Optional(
+                        CONF_DEFAULT_TRANSITION,
+                        default=options.get(CONF_DEFAULT_TRANSITION, DEFAULT_TRANSITION),
+                    ): vol.All(vol.Coerce(float), vol.Range(min=0, max=60)),
                 }
             ), errors=errors
         )

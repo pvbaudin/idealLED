@@ -11,6 +11,8 @@ from .const import (
     RETRY_MIN_INTERVAL,
     COMMAND_TIMEOUT,
     RESET_AFTER_FAILURES,
+    CONF_DEFAULT_TRANSITION,
+    DEFAULT_TRANSITION,
 )
 
 from homeassistant.const import CONF_MAC, STATE_ON, STATE_OFF
@@ -23,6 +25,7 @@ from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
     ATTR_HS_COLOR,
     ATTR_EFFECT,
+    ATTR_TRANSITION,
     ColorMode,
     LightEntity,
     LightEntityFeature,
@@ -41,6 +44,9 @@ async def async_setup_entry(hass, config_entry, async_add_devices):
     resend_interval = config_entry.options.get(
         CONF_RESEND_INTERVAL, DEFAULT_RESEND_INTERVAL
     )
+    default_transition = config_entry.options.get(
+        CONF_DEFAULT_TRANSITION, DEFAULT_TRANSITION
+    )
     async_add_devices(
         [
             IDEALLEDLight(
@@ -48,6 +54,7 @@ async def async_setup_entry(hass, config_entry, async_add_devices):
                 config_entry.data["name"],
                 config_entry.entry_id,
                 resend_interval,
+                default_transition,
             )
         ]
     )
@@ -60,11 +67,12 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
         name: str,
         entry_id: str,
         resend_interval: int = DEFAULT_RESEND_INTERVAL,
+        default_transition: float = DEFAULT_TRANSITION,
     ) -> None:
         self._instance = idealledinstance
         self._entry_id = entry_id
         self._attr_supported_color_modes = {ColorMode.HS}
-        self._attr_supported_features = LightEntityFeature.EFFECT
+        self._attr_supported_features = LightEntityFeature.EFFECT | LightEntityFeature.TRANSITION
         #self._attr_brightness_step_pct = 10
         self._attr_name = name
         self._attr_unique_id = self._instance.mac
@@ -76,9 +84,11 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
         self._last_confirmed = None
         self._consecutive_failures = 0
         self._resend_interval = resend_interval
+        self._default_transition = default_transition
         self._command_task: asyncio.Task | None = None
         self._enforce_task: asyncio.Task | None = None
         self._wake = asyncio.Event()
+        self._pending_transition: float = 0
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -105,7 +115,11 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
                 task.cancel()
         await super().async_will_remove_from_hass()
 
-    def _run_command(self, make_coro) -> asyncio.Task:
+    def _transition(self, kwargs: dict) -> float:
+        transition = kwargs.get(ATTR_TRANSITION)
+        return self._default_transition if transition is None else transition
+
+    def _run_command(self, make_coro, transition: float = 0) -> asyncio.Task:
         """Run a device command in the background, superseding any in-flight one.
 
         Service calls return immediately so a slow/unreachable strip can't block
@@ -113,6 +127,7 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
         """
         if self._command_task and not self._command_task.done():
             self._command_task.cancel()
+        self._pending_transition = transition
         # Background task so HA cancels it at shutdown instead of waiting on BLE.
         self._command_task = self.hass.async_create_background_task(
             self._guarded(make_coro), f"ideal_led command {self._instance.mac}"
@@ -121,7 +136,8 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
 
     async def _guarded(self, make_coro) -> None:
         try:
-            async with asyncio.timeout(COMMAND_TIMEOUT):
+            # A fade is part of the command, so it gets its own time on top.
+            async with asyncio.timeout(COMMAND_TIMEOUT + self._pending_transition):
                 await make_coro()
         except asyncio.CancelledError:
             raise
@@ -185,29 +201,35 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
     async def _send_power(self, on: bool) -> None:
         if on:
             await self._instance.turn_on()
+            if self._instance._effect is None:
+                # Re-assert the colour too: a faded-out strip holds black, so a
+                # bare power-on would leave it on but dark.
+                await self._instance.set_rgb_color(self._instance._hs_color)
         else:
             await self._instance.turn_off()
 
-    async def _apply_turn_on(self, kwargs: dict) -> None:
+    async def _apply_turn_on(self, kwargs: dict, transition: float) -> None:
+        bri = kwargs.get(ATTR_BRIGHTNESS, self._instance._brightness)
+        if ATTR_EFFECT in kwargs and kwargs[ATTR_EFFECT] != self.effect:
+            await self._instance.turn_on()
+            await self._instance.set_effect(kwargs[ATTR_EFFECT], bri)
+            return
+
         # Always send the power command: the device may have been switched off
         # behind our back, so our cached is_on can't be trusted to skip it.
-        await self._instance.turn_on()
+        fade_in = bool(transition) and not self._instance.is_on
+        await self._instance.turn_on(from_black=fade_in)
 
-        if ATTR_BRIGHTNESS in kwargs and len(kwargs) == 1:
-            # Only brightness changed
-            LOGGER.debug(f"Only setting brightness: {kwargs[ATTR_BRIGHTNESS]}")
-            await self._instance.set_brightness(kwargs[ATTR_BRIGHTNESS])
+        if self._instance._effect is not None and ATTR_HS_COLOR not in kwargs:
+            if ATTR_BRIGHTNESS in kwargs:
+                # Effects can't fade; re-send the effect at the new brightness.
+                await self._instance.set_brightness(kwargs[ATTR_BRIGHTNESS])
+            return
 
-        if ATTR_HS_COLOR in kwargs:
-            if kwargs[ATTR_HS_COLOR] != self.hs_color:
-                bri = kwargs[ATTR_BRIGHTNESS] if ATTR_BRIGHTNESS in kwargs else self._instance._brightness
-                LOGGER.debug(f"Setting color: {kwargs[ATTR_HS_COLOR]}. Brightness: {bri}")
-                await self._instance.set_rgb_color(kwargs[ATTR_HS_COLOR], bri)
-
-        if ATTR_EFFECT in kwargs:
-            if kwargs[ATTR_EFFECT] != self.effect:
-                bri = kwargs[ATTR_BRIGHTNESS] if ATTR_BRIGHTNESS in kwargs else self._instance._brightness
-                await self._instance.set_effect(kwargs[ATTR_EFFECT], bri)
+        # Always send the colour: after a fade-out the strip holds black.
+        hs = kwargs.get(ATTR_HS_COLOR, self._instance._hs_color)
+        LOGGER.debug(f"Setting color: {hs}. Brightness: {bri}. Transition: {transition}")
+        await self._instance.set_rgb_color(hs, bri, transition)
 
     @property
     def extra_state_attributes(self):
@@ -303,13 +325,15 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
         LOGGER.info("Turn on called.  kwargs: "+str(kwargs))
         self._desired_on = True
         self._in_sync = False
-        self._run_command(lambda: self._apply_turn_on(kwargs))
+        transition = self._transition(kwargs)
+        self._run_command(lambda: self._apply_turn_on(kwargs, transition), transition)
         self.async_write_ha_state()
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         self._desired_on = False
         self._in_sync = False
-        self._run_command(self._instance.turn_off)
+        transition = self._transition(kwargs)
+        self._run_command(lambda: self._instance.turn_off(transition), transition)
         self.async_write_ha_state()
 
     async def async_update(self) -> None:
