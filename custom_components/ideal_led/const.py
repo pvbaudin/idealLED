@@ -44,3 +44,10 @@ COMMAND_LOOKUP = {
 FIRMWARE_OVERRIDE = {
     "TR2503R004-01" : "TYPE2",
 }
+
+# State enforcement: re-send the desired on/off state periodically so the strip
+# can't drift (self-powering on, or a command lost to a flaky BLE link).
+CONF_RESEND_INTERVAL = "resend_interval"
+DEFAULT_RESEND_INTERVAL = 120  # seconds between re-sends once in sync; 0 disables
+RETRY_MIN_INTERVAL = 15  # first retry after a failed send, doubling up to the resend interval
+COMMAND_TIMEOUT = 60  # give up on a single send attempt after this long

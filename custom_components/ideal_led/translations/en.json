@@ -36,7 +36,8 @@
             "user": {
                 "data": {
                     "reset": "Reset color when led turn on",
-                    "delay": "Disconnect delay (0 equal never disconnect)"
+                    "delay": "Disconnect delay (0 equal never disconnect)",
+                    "resend_interval": "Re-send on/off state every N seconds to keep the strip in sync (0 disables)"
                 }
             }
         }
