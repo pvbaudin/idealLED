@@ -112,7 +112,10 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
         """
         if self._command_task and not self._command_task.done():
             self._command_task.cancel()
-        self._command_task = self.hass.async_create_task(self._guarded(make_coro))
+        # Background task so HA cancels it at shutdown instead of waiting on BLE.
+        self._command_task = self.hass.async_create_background_task(
+            self._guarded(make_coro), f"ideal_led command {self._instance.mac}"
+        )
         return self._command_task
 
     async def _guarded(self, make_coro) -> None:
