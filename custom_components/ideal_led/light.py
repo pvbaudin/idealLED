@@ -10,6 +10,7 @@ from .const import (
     DEFAULT_RESEND_INTERVAL,
     RETRY_MIN_INTERVAL,
     COMMAND_TIMEOUT,
+    RESET_AFTER_FAILURES,
 )
 
 from homeassistant.const import CONF_MAC, STATE_ON, STATE_OFF
@@ -128,12 +129,20 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
             self._in_sync = False
             self._consecutive_failures += 1
             LOGGER.warning(
-                "%s: failed to send %s (attempt %s), will retry: %s",
+                "%s: failed to send %s (attempt %s), will retry: %s: %s",
                 self.name,
                 "on" if self._desired_on else "off",
                 self._consecutive_failures,
-                err or type(err).__name__,
+                type(err).__name__,
+                err,
             )
+            if self._consecutive_failures % RESET_AFTER_FAILURES == 0:
+                # Repeated failures can mean a wedged connection rather than range:
+                # start the next attempt from a fresh client.
+                try:
+                    await self._instance.reset_connection()
+                except Exception as reset_err:  # noqa: BLE001
+                    LOGGER.debug("%s: reset failed: %r", self.name, reset_err)
         else:
             self._in_sync = True
             self._consecutive_failures = 0

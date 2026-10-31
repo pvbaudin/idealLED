@@ -51,3 +51,4 @@ CONF_RESEND_INTERVAL = "resend_interval"
 DEFAULT_RESEND_INTERVAL = 120  # seconds between re-sends once in sync; 0 disables
 RETRY_MIN_INTERVAL = 15  # first retry after a failed send, doubling up to the resend interval
 COMMAND_TIMEOUT = 60  # give up on a single send attempt after this long
+RESET_AFTER_FAILURES = 3  # drop the BLE client and start fresh after this many failures in a row

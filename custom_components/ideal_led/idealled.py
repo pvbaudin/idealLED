@@ -546,13 +546,16 @@ class IDEALLEDInstance:
             if self._client and self._client.is_connected:
                 self._reset_disconnect_timer()
                 return
-            # If device wasn't available at startup, try to get it now
+            # Use the freshest BLEDevice HA has: the one cached at startup can go stale
+            # (e.g. a different adapter/path), and connecting with it then keeps failing.
+            self._device = (
+                bluetooth.async_ble_device_from_address(self._hass, self._mac, connectable=True)
+                or self._device
+            )
             if not self._device:
-                self._device = bluetooth.async_ble_device_from_address(self._hass, self._mac)
-                if not self._device:
-                    raise Exception(
-                        f"Bluetooth device {self._mac} not found. Ensure the device is powered on and in range."
-                    )
+                raise Exception(
+                    f"Bluetooth device {self._mac} not found. Ensure the device is powered on and in range."
+                )
             LOGGER.debug("%s: Connecting", self.name)
             client = await establish_connection(
                 BleakClientWithServiceCache,
@@ -569,13 +572,20 @@ class IDEALLEDInstance:
                 resolved = self._resolve_characteristics(await client.get_services())
             self._cached_services = client.services if resolved else None
 
+            # Subscribe to notification is needed for LEDnetWF devices to accept commands.
+            # Only adopt the client once that worked, so a half-set-up connection is never
+            # reused by later commands.
+            self._notification_callback = self._notification_handler
+            try:
+                await client.start_notify(self._read_uuid, self._notification_callback)
+            except BaseException:
+                self._expected_disconnect = True
+                await self._safe_disconnect(client)
+                raise
+            LOGGER.debug("%s: Subscribed to notifications", self.name)
+
             self._client = client
             self._reset_disconnect_timer()
-
-            # Subscribe to notification is needed for LEDnetWF devices to accept commands
-            self._notification_callback = self._notification_handler
-            await client.start_notify(self._read_uuid, self._notification_callback)
-            LOGGER.debug("%s: Subscribed to notifications", self.name)
 
     def _resolve_characteristics(self, services: BleakGATTServiceCollection) -> bool:
         """Resolve characteristics."""
@@ -642,13 +652,35 @@ class IDEALLEDInstance:
             self._expected_disconnect = True
             self._client = None
             self._write_uuid = None
+            self._write_colour_uuid = None
             self._read_uuid = None
             if client and client.is_connected:
-                await client.stop_notify(
-                    read_char
-                )  #  TODO:  I don't think this is needed.  Bleak docs say it isnt.
-                await client.disconnect()
+                try:
+                    await client.stop_notify(
+                        read_char
+                    )  #  TODO:  I don't think this is needed.  Bleak docs say it isnt.
+                except Exception as err:  # noqa: BLE001
+                    LOGGER.debug("%s: stop_notify failed: %r", self.name, err)
+                await self._safe_disconnect(client)
             LOGGER.debug("%s: Disconnected", self.name)
+
+    async def _safe_disconnect(self, client: BleakClientWithServiceCache) -> None:
+        """Disconnect, swallowing errors: a dead link (dbus EOFError etc.) must not
+        surface as an unretrieved task exception or block the next connect."""
+        try:
+            await client.disconnect()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("%s: disconnect failed: %r", self.name, err)
+
+    async def reset_connection(self) -> None:
+        """Drop the client, cached services and BLEDevice so the next command starts clean."""
+        LOGGER.debug("%s: Resetting connection", self.name)
+        if self._disconnect_timer:
+            self._disconnect_timer.cancel()
+            self._disconnect_timer = None
+        await self._execute_disconnect()
+        self._cached_services = None
+        self._device = None
 
     def local_callback(self):
         # Placeholder to be replaced by a call from light.py
