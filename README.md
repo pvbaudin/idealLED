@@ -1,3 +1,12 @@
+> **Fork note (pvbaudin/idealLED):** this fork adds state enforcement. These
+> controllers give no state feedback and can switch themselves on, or miss a
+> command over a weak BLE link. The light remembers the last state HA asked for
+> (restored across restarts) and re-sends it every `resend_interval` seconds
+> (integration options, default 120, 0 disables), retrying with backoff on
+> failure. On/off calls return immediately and the BLE work runs in the
+> background. The `in_sync`, `last_confirmed` and `consecutive_failures`
+> attributes show whether the device acknowledged the last send.
+
 # iDeal LED control
 
 ![image](https://github.com/8none1/idealLED/assets/6552931/c5fcd8fc-440a-48dd-abe4-d6fdd2e4a422)
