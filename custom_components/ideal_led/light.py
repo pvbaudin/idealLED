@@ -201,9 +201,12 @@ class IDEALLEDLight(LightEntity, RestoreEntity):
     async def _send_power(self, on: bool) -> None:
         if on:
             await self._instance.turn_on()
-            if self._instance._effect is None:
-                # Re-assert the colour too: a faded-out strip holds black, so a
-                # bare power-on would leave it on but dark.
+            # Re-assert the colour only when it may be wrong (startup, or the last
+            # send failed part-way, possibly leaving a faded-out strip on but black).
+            # Re-writing it on every in-sync resend makes the strip visibly blink.
+            if self._instance._effect is None and (
+                not self._in_sync or self._instance._output_rgb is None
+            ):
                 await self._instance.set_rgb_color(self._instance._hs_color)
         else:
             await self._instance.turn_off()
